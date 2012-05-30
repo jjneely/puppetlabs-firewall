@@ -194,7 +194,7 @@ Puppet::Type.type(:firewall).provide :iptables, :parent => Puppet::Provider::Fir
 
   def delete_args
     count = []
-    line = properties[:line].gsub(/\-A/, '-D').split
+    line = properties[:line].gsub(/\s+\-A\s+/, ' -D ').split
 
     # Grab all comment indices
     line.each do |v|
