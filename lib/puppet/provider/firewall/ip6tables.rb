@@ -43,7 +43,7 @@ Puppet::Type.type(:firewall).provide :ip6tables, :parent => :iptables, :source =
     :toports => "--to-ports",
     :tosource => "--to-source",
     :uid => "-m owner --uid-owner",
-    :pkttype => "-m pkttype --pkt-type"
+    :pkttype => "-m pkttype --pkt-type",
     :bridge => "-m physdev",
   }
 
