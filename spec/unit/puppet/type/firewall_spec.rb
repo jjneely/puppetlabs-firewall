@@ -12,6 +12,9 @@ describe firewall do
     Puppet::Type::Firewall.stubs(:defaultprovider).returns @provider
 
     @resource = @class.new({:name  => '000 test foo'})
+
+    # Stub iptables version
+    Facter.fact(:iptables_version).stubs(:value).returns("1.4.2")
   end
 
   it 'should have :name be its namevar' do
@@ -34,7 +37,7 @@ describe firewall do
       res = @class.new(:name => "000 test")
       res.parameters[:action].should == nil
     end
- 
+
     [:accept, :drop, :reject].each do |action|
       it "should accept value #{action}" do
         @resource[:action] = action
@@ -74,7 +77,7 @@ describe firewall do
   end
 
   describe ':proto' do
-    [:tcp, :udp, :icmp, :esp, :ah, :vrrp, :igmp, :ipencap, :ospf, :all].each do |proto|
+    [:tcp, :udp, :icmp, :esp, :ah, :vrrp, :igmp, :ipencap, :ospf, :gre, :all].each do |proto|
       it "should accept proto value #{proto}" do
         @resource[:proto] = proto
         @resource[:proto].should == proto
@@ -238,7 +241,11 @@ describe firewall do
       @resource[:icmp].should == 9
     end
 
-    it 'should fail if icmp type is not recognized' do
+    it 'should fail if icmp type is "any"' do
+      lambda { @resource[:icmp] = 'any' }.should raise_error(Puppet::Error)
+    end
+
+    it 'should fail if icmp type cannot be mapped to a numeric' do
       lambda { @resource[:icmp] = 'foo' }.should raise_error(Puppet::Error)
     end
   end
@@ -273,10 +280,10 @@ describe firewall do
 
   describe ':action and :jump' do
     it 'should allow only 1 to be set at a time' do
-      expect { 
+      expect {
         @class.new(
-          :name => "001-test", 
-          :action => "accept", 
+          :name => "001-test",
+          :action => "accept",
           :jump => "custom_chain"
         )
       }.should raise_error(Puppet::Error, /^Only one of the parameters 'action' and 'jump' can be set$/)
@@ -302,13 +309,74 @@ describe firewall do
   end
 
   describe ':set_mark' do
-    it 'should allow me to set set-mark' do
-      @resource[:set_mark] = '0x3e8'
-      @resource[:set_mark].should == '0x3e8'
-    end
-    it 'should convert int to hex' do
-      @resource[:set_mark] = '1000'
-      @resource[:set_mark].should == '0x3e8'
+    ['1.3.2', '1.4.2'].each do |iptables_version|
+      describe "with iptables #{iptables_version}" do
+        before {
+          Facter.clear
+          Facter.fact(:iptables_version).stubs(:value).returns(iptables_version)
+          Facter.fact(:ip6tables_version).stubs(:value).returns(iptables_version)
+        }
+
+        if iptables_version == '1.3.2'
+          it 'should allow me to set set-mark without mask' do
+            @resource[:set_mark] = '0x3e8'
+            @resource[:set_mark].should == '0x3e8'
+          end
+          it 'should convert int to hex without mask' do
+            @resource[:set_mark] = '1000'
+            @resource[:set_mark].should == '0x3e8'
+          end
+          it 'should fail if mask is present' do
+            lambda { @resource[:set_mark] = '0x3e8/0xffffffff'}.should raise_error(
+              Puppet::Error, /iptables version #{iptables_version} does not support masks on MARK rules$/
+            )
+          end
+        end
+
+        if iptables_version == '1.4.2'
+          it 'should allow me to set set-mark with mask' do
+            @resource[:set_mark] = '0x3e8/0xffffffff'
+            @resource[:set_mark].should == '0x3e8/0xffffffff'
+          end
+          it 'should convert int to hex and add a 32 bit mask' do
+            @resource[:set_mark] = '1000'
+            @resource[:set_mark].should == '0x3e8/0xffffffff'
+          end
+          it 'should add a 32 bit mask' do
+            @resource[:set_mark] = '0x32'
+            @resource[:set_mark].should == '0x32/0xffffffff'
+          end
+          it 'should use the mask provided' do
+            @resource[:set_mark] = '0x32/0x4'
+            @resource[:set_mark].should == '0x32/0x4'
+          end
+          it 'should use the mask provided and convert int to hex' do
+            @resource[:set_mark] = '1000/0x4'
+            @resource[:set_mark].should == '0x3e8/0x4'
+          end
+          it 'should fail if mask value is more than 32 bits' do
+            lambda { @resource[:set_mark] = '1/4294967296'}.should raise_error(
+              Puppet::Error, /MARK mask must be integer or hex between 0 and 0xffffffff$/
+            )
+          end
+          it 'should fail if mask is malformed' do
+            lambda { @resource[:set_mark] = '1000/0xq4'}.should raise_error(
+              Puppet::Error, /MARK mask must be integer or hex between 0 and 0xffffffff$/
+            )
+          end
+        end
+
+        ['/', '1000/', 'pwnie'].each do |bad_mark|
+          it "should fail with malformed mark '#{bad_mark}'" do
+            lambda { @resource[:set_mark] = bad_mark}.should raise_error(Puppet::Error)
+          end
+        end
+        it 'should fail if mark value is more than 32 bits' do
+          lambda { @resource[:set_mark] = '4294967296'}.should raise_error(
+            Puppet::Error, /MARK value must be integer or hex between 0 and 0xffffffff$/
+          )
+        end
+      end
     end
   end
 
@@ -390,6 +458,19 @@ describe firewall do
       rel[0].target.ref.should == @resource.ref
       rel[1].source.ref.should == chain_bar.ref
       rel[1].target.ref.should == @resource.ref
+    end
+  end
+
+  describe ':pkttype' do
+    [:multicast, :broadcast, :unicast].each do |pkttype|
+      it "should accept pkttype value #{pkttype}" do
+        @resource[:pkttype] = pkttype
+        @resource[:pkttype].should == pkttype
+      end
+    end
+
+    it 'should fail when the pkttype value is not recognized' do
+      lambda { @resource[:pkttype] = 'not valid' }.should raise_error(Puppet::Error)
     end
   end
 end
