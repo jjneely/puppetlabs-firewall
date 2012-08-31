@@ -695,9 +695,9 @@ Puppet::Type.newtype(:firewall) do
       self.fail "Only one of the parameters 'action' and 'jump' can be set"
     end
 
-    if value(:bridged)
+    if value(:bridge)
       unless value(:chain).to_s =~ /FORWARD/
-        self.fail "Parameter isbridged only applies to the FORWARD chain"
+        self.fail "Parameter bridge only applies to the FORWARD chain"
       end
     end
   end
