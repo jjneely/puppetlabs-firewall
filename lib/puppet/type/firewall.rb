@@ -534,14 +534,15 @@ Puppet::Type.newtype(:firewall) do
     EOS
 
     newvalues(:unicast, :broadcast, :multicast)
-  
+  end
+
   newproperty(:recent_name) do
     desc <<-EOS
       List name for use with recent commands
     EOS
     newvalue(/^\S+$/)
     
-    defaultto :DEFAULT
+    #defaultto :DEFAULT
   end
   
   newproperty(:recent_command) do
@@ -561,6 +562,28 @@ Puppet::Type.newtype(:firewall) do
   newproperty(:recent_hitcount) do
   desc <<-EOS
     Narrows the recent to those equal or great than this count
+  EOS
+    newvalue(/^\d+$/)
+  end
+
+  newproperty(:recent_rsource) do
+  desc <<-EOS
+    Match/save the source address of each packet in the recent list table.
+  EOS
+    newvalues(true, false)
+  end
+
+  newproperty(:recent_rdest) do
+  desc <<-EOS
+    Match/save the destination address of each packet in the recent list table.
+  EOS
+    newvalues(true, false)
+    defaultto false
+  end
+
+  newproperty(:recent_rttl) do
+  desc <<-EOS
+    TTL of the current packet.  Only in conjunction with rcheck or update.
   EOS
     newvalue(/^\d+$/)
   end
@@ -709,6 +732,18 @@ Puppet::Type.newtype(:firewall) do
 
     if value(:action) && value(:jump)
       self.fail "Only one of the parameters 'action' and 'jump' can be set"
+    end
+
+    if value(:bridge)
+      unless value(:chain).to_s =~ /FORWARD/
+        self.fail "Parameter bridge only applies to the FORWARD chain"
+      end
+    end
+
+    if value(:recent_rttl)
+      unless value(:recent_command).to_s =~ /rcheck|update/
+        self.fail "Parameter recent_rttl can only used with rcheck and update"
+      end
     end
   end
 end

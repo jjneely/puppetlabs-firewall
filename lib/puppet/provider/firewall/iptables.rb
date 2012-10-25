@@ -55,6 +55,7 @@ Puppet::Type.type(:firewall).provide :iptables, :parent => Puppet::Provider::Fir
     :recent_update => "-m recent --update",
     :recent_remove => "-m recent --remove",
     :recent_rcheck => "-m recent --rcheck",
+    :recent_name => "--name",
     :recent_rsource => "--rsource",
     :recent_rdest => "--rdest",
     :recent_seconds => "--seconds",
@@ -81,6 +82,7 @@ Puppet::Type.type(:firewall).provide :iptables, :parent => Puppet::Provider::Fir
     :recent_update, :recent_set, :recent_rcheck, :recent_remove, :recent_seconds, :recent_hitcount,
     :recent_rttl, :recent_name, :recent_rsource, :recent_rdest,
     :jump, :todest, :tosource, :toports, :log_level, :log_prefix, :reject, :set_mark]
+  @resource_list_noargs = [:recent_set, :recent_update, :recent_rcheck, :recent_remove, :recent_rsource, :recent_rdest]
 
   def insert
     debug 'Inserting rule %s' % resource[:name]
@@ -138,13 +140,32 @@ Puppet::Type.type(:firewall).provide :iptables, :parent => Puppet::Provider::Fir
     keys = []
     values = line.dup
 
+    # instead of slicing out table with the rest of the options, remove it
+    # completely from the line, since it's already passed anyway.
+    # Without this, it trips up the order of keys and values and
+    # exchanges chain and table, since iptables --list-rules lists
+    # tables before chains.
+    values.slice!("-t %s" % table)
+
     # --tcp-flags takes two values; we cheat by adding " around it
     # so it behaves like --comment
     values = values.sub(/--tcp-flags (\S*) (\S*)/, '--tcp-flags "\1 \2"')
 
     @resource_list.reverse.each do |k|
-      if values.slice!(/\s#{@resource_map[k]}/)
+      # we don't want accidental half-word matches,
+      # like -p in icmp-port-unreachable
+      search = /(^|.*\s)#{@resource_map[k]}(\s.*|$)/
+      # options that take no arguments should get a placeholder empty ""
+      # so keys and values still match
+      if @resource_list_noargs.include?(k)
+        replace = '""'
+      else
+        replace = ''
+      end
+      new = values.sub(search, "\\1%s\\2" % replace)
+      if values != new
         keys << k
+        values = new
       end
     end
 
@@ -152,7 +173,21 @@ Puppet::Type.type(:firewall).provide :iptables, :parent => Puppet::Provider::Fir
     values.slice!('-A')
     keys << :chain
 
-    keys.zip(values.scan(/"[^"]*"|\S+/).reverse) { |f, v| hash[f] = v.gsub(/"/, '') }
+    # keys now contains a list of the keys present in line,
+    # and values is a string of the matching space-separated option values,
+    # but reversed
+
+    begin
+      # some params don't take a value, for example some recent_
+      keys.zip(values.scan(/"[^"]*"|\S+/).reverse) { |f, v|
+        hash[f] = v ? v.gsub(/"/, '') : nil }
+    rescue => exp
+      puts "Error at keys.zip(): " + exp
+      # puts keys.zip(values.scan(/"[^"]*"|\S+/).reverse)
+      puts "Keys: " + keys.inspect
+      puts "Values: " + values.scan(/"[^"]*"|\S+/).reverse.inspect
+      raise
+    end
 
     # Normalise all rules to CIDR notation.
     [:source, :destination].each do |prop|
@@ -166,11 +201,16 @@ Puppet::Type.type(:firewall).provide :iptables, :parent => Puppet::Provider::Fir
     # Our type prefers hyphens over colons for ranges so ...
     # Iterate across all ports replacing colons with hyphens so that ranges match
     # the types expectations.
-    [:dport, :sport, :port].each do |prop|
-      next unless hash[prop]
-      hash[prop] = hash[prop].collect do |elem|
-        elem.gsub(/:/,'-')
+    begin
+      [:dport, :sport, :port].each do |prop|
+        next unless hash[prop]
+        hash[prop] = hash[prop].collect do |elem|
+          elem.gsub(/:/,'-')
+        end
       end
+    rescue => exp
+      puts "Error at range delimiting: " + exp
+      raise
     end
 
     # States should always be sorted. This ensures that the output from
@@ -190,9 +230,7 @@ Puppet::Type.type(:firewall).provide :iptables, :parent => Puppet::Provider::Fir
       hash[:log_level] = '4'
     end
 
-    # rsource if the default if rdest isn't set
-    hash[:recent_rsource] = true if ! hash[:recent_rdest]
-
+    # Handle recent module
     hash[:recent_command] = :set if hash.include?(:recent_set)
     hash[:recent_command] = :update if hash.include?(:recent_update)
     hash[:recent_command] = :remove if hash.include?(:recent_remove)
@@ -201,6 +239,10 @@ Puppet::Type.type(:firewall).provide :iptables, :parent => Puppet::Provider::Fir
     [:recent_set, :recent_update, :recent_remove, :recent_rcheck].each do |key|
       hash.delete(key)
     end
+
+    # rsource is the default if rdest isn't set and recent is being used
+    hash[:recent_rsource] = true if \
+        hash.key?:recent_command and ! hash[:recent_rdest]
     
     hash[:line] = line
     hash[:provider] = self.name.to_s
@@ -238,7 +280,12 @@ Puppet::Type.type(:firewall).provide :iptables, :parent => Puppet::Provider::Fir
 
   def delete_args
     count = []
-    line = properties[:line].gsub(/\-A/, '-D').split
+    begin
+      line = properties[:line].gsub(/(^|\s+)-A\s+/, '\\1-D ').split
+    rescue => exp
+      puts "Error at delete_args(): " + exp
+      raise
+    end
 
     # Grab all comment indices
     line.each do |v|
@@ -247,12 +294,13 @@ Puppet::Type.type(:firewall).provide :iptables, :parent => Puppet::Provider::Fir
       end
     end
 
-    if ! count.empty?
-      # Remove quotes and set first comment index to full string
-      line[count.first] = line[count.first..count.last].join(' ').gsub(/"/, '')
-
-      # Make all remaining comment indices nil
-      ((count.first + 1)..count.last).each do |i|
+    # Merge the quoted comments/etc into one element
+    count.reverse!
+    while ! count.empty?
+      startidx = count.pop
+      stopidx  = count.pop
+      line[startidx] = line[startidx..stopidx].join(' ').gsub(/"/, '')
+      ((startidx + 1)..stopidx).each do |i|
         line[i] = nil
       end
     end
@@ -268,40 +316,71 @@ Puppet::Type.type(:firewall).provide :iptables, :parent => Puppet::Provider::Fir
 
     args = []
     resource_list = self.class.instance_variable_get('@resource_list')
+    resource_list_noargs = self.class.instance_variable_get('@resource_list_noargs')
     resource_map = self.class.instance_variable_get('@resource_map')
+    resource_list_recent_commands = [:recent_set, :recent_update, :recent_rcheck, :recent_remove]
 
     resource_list.each do |res|
       resource_value = nil
-      if (resource[res]) then
-        resource_value = resource[res]
-      elsif res == :jump and resource[:action] then
-        # In this case, we are substituting jump for action
-        resource_value = resource[:action].to_s.upcase
-      else
-        next
+      if ! resource_list_noargs.include?(res) then
+        if (resource[res]) then
+          resource_value = resource[res]
+        elsif res == :jump and resource[:action] then
+          # In this case, we are substituting jump for action
+          resource_value = resource[:action].to_s.upcase
+        else
+          next
+        end
+      end
+
+      what = res.to_s.scan(/^recent_(\w+)/)
+      if ! what.empty?
+        # only append recent_ args if there is a recent_command
+        if ! (resource['recent_command'])
+          next
+        end
+        # only append the right recent_ command
+        if resource_list_recent_commands.include?(res) and \
+            resource['recent_command'].to_s != what[0][0]
+          next
+        end
+        # only append rsource/rdest if set
+        if res == :recent_rsource and not resource['recent_rsource']:
+          next
+        end
+        if res == :recent_rdest and not resource['recent_rdest']:
+          next
+        end
       end
 
       args << resource_map[res].split(' ')
 
       # For sport and dport, convert hyphens to colons since the type
       # expects hyphens for ranges of ports.
-      if [:sport, :dport, :port].include?(res) then
-        resource_value = resource_value.collect do |elem|
-          elem.gsub(/-/, ':')
+      begin
+        if [:sport, :dport, :port].include?(res) then
+          resource_value = resource_value.collect do |elem|
+            elem.gsub(/-/, ':')
+          end
         end
+      rescue => exp
+        puts "Error at general_args(): " + exp
+        raise
       end
 
-      # our tcp_flags takes a single string with comma lists separated
-      # by space
-      # --tcp-flags expects two arguments
-      if res == :tcp_flags
-        one, two = resource_value.split(' ')
-        args << one
-        args << two
-      elsif resource_value.is_a?(Array)
-        args << resource_value.join(',')
-      else
-        args << resource_value
+      if !resource_list_noargs.include?(res) then
+        # our tcp_flags takes a single string with comma lists separated
+        # by space
+        # --tcp-flags expects two arguments
+        if res == :tcp_flags
+          one, two = resource_value.split(' ')
+          args << one
+          args << two
+        elsif resource_value.is_a?(Array)
+          args << resource_value.join(',')
+        else
+          args << resource_value
+        end
       end
     end
 
